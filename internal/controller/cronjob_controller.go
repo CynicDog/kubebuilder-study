@@ -13,6 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
+// +kubebuilder:docs-gen:collapse=Apache License
 
 package controller
 
@@ -49,6 +50,8 @@ type realClock struct{}
 type Clock interface {
 	Now() time.Time
 }
+
+// +kubebuilder:docs-gen:collapse=Clock
 
 func (rc realClock) Now() time.Time { return time.Now() } //nolint:staticcheck
 
