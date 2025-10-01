@@ -71,7 +71,7 @@ var (
 // +kubebuilder:rbac:groups=batch.tutorial.kubebuilder.io,resources=cronjobs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=batch.tutorial.kubebuilder.io,resources=cronjobs/finalizers,verbs=update
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=batch,resources=jobs,status,verbs=get
+// +kubebuilder:rbac:groups=batch,resources=jobs/status,verbs=get
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -240,7 +240,16 @@ func (r *CronJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		})
 	}
 
+	// Update the status
 	if err := r.Status().Update(ctx, &cronJob); err != nil {
+		// We only care about conflict errors and ignore the rest
+		if apierrors.IsConflict(err) {
+			// The next reconcile will get the latest version and retry all logic.
+			log.Info("Failed to update CronJob status due to conflict, will re-reconcile immediately", "error", err)
+			return ctrl.Result{}, nil
+		}
+
+		// For all other errors, log it and return the error to trigger backoff.
 		log.Error(err, "Unable to update CronJob status")
 		return ctrl.Result{}, err
 	}
@@ -418,31 +427,35 @@ func (r *CronJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	if err := r.Create(ctx, job); err != nil {
-		log.Error(err, "Unable to create Job for CronJob", "job", job)
-		meta.SetStatusCondition(&cronJob.Status.Conditions, metav1.Condition{
-			Type:    typeDegradedCronJob,
-			Status:  metav1.ConditionTrue,
-			Reason:  "JobCreationFailed",
-			Message: fmt.Sprintf("Failed to create job: %v", err),
-		})
-		if statusErr := r.Status().Update(ctx, &cronJob); statusErr != nil {
-			log.Error(statusErr, "Failed to update CronJob status")
+		// If the job already exists, we stop trying to create it and continue the reconcile loop.
+		// The subsequent status-checking logic will find the existing job.
+		if apierrors.IsAlreadyExists(err) {
+			log.V(1).Info("Job already exists, likely created by another controller or previous reconcile attempt", "job", job)
+		} else {
+			log.Error(err, "Unable to create Job for CronJob", "job", job)
+			meta.SetStatusCondition(&cronJob.Status.Conditions, metav1.Condition{
+				Type:    typeDegradedCronJob,
+				Status:  metav1.ConditionTrue,
+				Reason:  "JobCreationFailed",
+				Message: fmt.Sprintf("Failed to create job: %v", err),
+			})
+			if statusErr := r.Status().Update(ctx, &cronJob); statusErr != nil {
+				log.Error(statusErr, "Failed to update CronJob status")
+			}
+			return ctrl.Result{}, err // Return error for actual creation failures
 		}
-		return ctrl.Result{}, err
+	} else { // Job creation succeeded
+		log.V(1).Info("created Job for CronJob run", "job", job)
+		meta.SetStatusCondition(&cronJob.Status.Conditions, metav1.Condition{
+			Type:    typeProgressingCronJob,
+			Status:  metav1.ConditionTrue,
+			Reason:  "JobCreated",
+			Message: fmt.Sprintf("Created job %s", job.Name),
+		})
 	}
-
-	log.V(1).Info("created Job for CronJob run", "job", job)
-
-	meta.SetStatusCondition(&cronJob.Status.Conditions, metav1.Condition{
-		Type:    typeProgressingCronJob,
-		Status:  metav1.ConditionTrue,
-		Reason:  "JobCreated",
-		Message: fmt.Sprintf("Created job %s", job.Name),
-	})
 	if statusErr := r.Status().Update(ctx, &cronJob); statusErr != nil {
 		log.Error(statusErr, "Failed to update CronJob status")
 	}
-
 	return scheduleResult, nil
 }
 
