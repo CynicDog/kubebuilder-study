@@ -189,7 +189,7 @@ func (r *CronJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 		cronJob.Status.Active = append(cronJob.Status.Active, *jobRef)
 	}
-	log.V(1).Info("job count", "active jobs", len(activeJobs), "succssful jobs", len(successfulJobs), "failed jobs", len(failedJobs))
+	log.V(1).Info("job count", "active jobs", len(activeJobs), "successful jobs", len(successfulJobs), "failed jobs", len(failedJobs))
 
 	isSuspended := cronJob.Spec.Suspend != nil && *cronJob.Spec.Suspend
 	if isSuspended {
@@ -339,7 +339,7 @@ func (r *CronJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		meta.SetStatusCondition(&cronJob.Status.Conditions, metav1.Condition{
 			Type:    typeDegradedCronJob,
 			Status:  metav1.ConditionTrue,
-			Reason:  "InvalideSchedule",
+			Reason:  "InvalidSchedule",
 			Message: fmt.Sprintf("Failed to parse schedule: %v", err),
 		})
 		if statusErr := r.Status().Update(ctx, &cronJob); statusErr != nil {
