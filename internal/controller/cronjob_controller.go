@@ -236,7 +236,7 @@ func (r *CronJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			Type:    typeProgressingCronJob,
 			Status:  metav1.ConditionFalse,
 			Reason:  "NoJobsActive",
-			Message: "No jobs are currenly active",
+			Message: "No jobs are currently active",
 		})
 	}
 

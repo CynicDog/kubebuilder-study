@@ -18,67 +18,142 @@ package controller
 
 import (
 	"context"
+	"reflect"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
+	batchv1 "k8s.io/api/batch/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	batchv1 "tutorial.kubebuilder.io/project/api/v1"
+	"k8s.io/apimachinery/pkg/types"
+
+	cronjobv1 "tutorial.kubebuilder.io/project/api/v1"
 )
 
-var _ = Describe("CronJob Controller", func() {
-	Context("When reconciling a resource", func() {
-		const resourceName = "test-resource"
+// +kubebuilder:docs-gen:collapse=Imports
 
-		ctx := context.Background()
-
-		typeNamespacedName := types.NamespacedName{
-			Name:      resourceName,
-			Namespace: "default", // TODO(user):Modify as needed
+func hasCondition(conditions []metav1.Condition, conditionType string, expectedStatus metav1.ConditionStatus) bool {
+	for _, condition := range conditions {
+		if condition.Type == conditionType && condition.Status == expectedStatus {
+			return true
 		}
-		cronjob := &batchv1.CronJob{}
+	}
+	return false
+}
 
-		BeforeEach(func() {
-			By("creating the custom resource for the Kind CronJob")
-			err := k8sClient.Get(ctx, typeNamespacedName, cronjob)
-			if err != nil && errors.IsNotFound(err) {
-				resource := &batchv1.CronJob{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      resourceName,
-						Namespace: "default",
+var _ = Describe("CronJob Controller", func() {
+
+	const (
+		CronJobName      = "test-cronjob"
+		CronJobNamespace = "default"
+		JobName          = "test-job"
+
+		timeout  = time.Second * 10
+		duration = time.Second * 10
+		interval = time.Millisecond * 250
+	)
+
+	Context("When updating CronJob Status", func() {
+		It("Should increase CronJob Status.Active count when new Jobs are created", func() {
+			By("Creating a new CronJob")
+			ctx := context.Background()
+			cronJob := &cronjobv1.CronJob{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "batch.tutorial.kubebuilder.io/v1",
+					Kind:       "CronJob",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      CronJobName,
+					Namespace: CronJobNamespace,
+				},
+				Spec: cronjobv1.CronJobSpec{
+					Schedule: "1 * * * *",
+					JobTemplate: batchv1.JobTemplateSpec{
+						Spec: batchv1.JobSpec{
+							Template: v1.PodTemplateSpec{
+								Spec: v1.PodSpec{
+									Containers: []v1.Container{
+										{
+											Name:  "test-container",
+											Image: "test-image",
+										},
+									},
+									RestartPolicy: v1.RestartPolicyOnFailure,
+								},
+							},
+						},
 					},
-					// TODO(user): Specify other spec details if needed.
-				}
-				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+				},
 			}
-		})
+			Expect(k8sClient.Create(ctx, cronJob)).To(Succeed())
 
-		AfterEach(func() {
-			// TODO(user): Cleanup logic after each test, like removing the resource instance.
-			resource := &batchv1.CronJob{}
-			err := k8sClient.Get(ctx, typeNamespacedName, resource)
-			Expect(err).NotTo(HaveOccurred())
+			cronjobLookupKey := types.NamespacedName{
+				Name:      CronJobName,
+				Namespace: CronJobNamespace,
+			}
+			createdCronjob := &cronjobv1.CronJob{}
 
-			By("Cleanup the specific resource instance CronJob")
-			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
-		})
-		It("should successfully reconcile the resource", func() {
-			By("Reconciling the created resource")
-			controllerReconciler := &CronJobReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, cronjobLookupKey, createdCronjob)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			Expect(createdCronjob.Spec.Schedule).To(Equal("1 * * * *"))
+
+			// Test that CronJob.Status.Active correctly tracks active downstream Jobs, starting with none.
+			By("By checking the CronJob has zero active Jobs")
+			Consistently(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, cronjobLookupKey, createdCronjob)).To(Succeed())
+				g.Expect(createdCronjob.Status.Active).To(BeEmpty())
+			}, duration, interval).Should(Succeed())
+
+			// Create a stub Job with active pods and set its owner to the test CronJob.
+			By("By creating a new job ")
+			testJob := &batchv1.Job{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      JobName,
+					Namespace: CronJobNamespace,
+				},
+				Spec: batchv1.JobSpec{
+					Template: v1.PodTemplateSpec{
+						Spec: v1.PodSpec{
+							Containers: []v1.Container{
+								{
+									Name:  "test-container",
+									Image: "test-image",
+								},
+							},
+							RestartPolicy: v1.RestartPolicyOnFailure,
+						},
+					},
+				},
 			}
 
-			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
-			Expect(err).NotTo(HaveOccurred())
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
+			kind := reflect.TypeOf(cronjobv1.CronJob{}).Name()
+			gvk := cronjobv1.GroupVersion.WithKind(kind)
+
+			controllerRef := metav1.NewControllerRef(createdCronjob, gvk)
+			testJob.SetOwnerReferences([]metav1.OwnerReference{*controllerRef})
+
+			Expect(k8sClient.Create(ctx, testJob)).To(Succeed())
+
+			testJob.Status.Active = 1
+			Expect(k8sClient.Status().Update(ctx, testJob)).To(Succeed())
+
+			By("By chcecking that the CronJob has one active Job")
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, cronjobLookupKey, createdCronjob)).To(Succeed(), "should GET the CronJob")
+				g.Expect(createdCronjob.Status.Active).To(HaveLen(1), "should have exactly one active job")
+				g.Expect(createdCronjob.Status.Active[0].Name).To(Equal(JobName), "the wrong job is active")
+			}, timeout, interval).Should(Succeed(), "should list our active job %s in the active jobs list in status", JobName)
+
+			By("By checking that the CronJob status conditions are properply set")
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, cronjobLookupKey, createdCronjob)).To(Succeed())
+				g.Expect(hasCondition(createdCronjob.Status.Conditions, "Available", metav1.ConditionTrue)).To(BeTrue(),
+					"CronJob should have Availalbe condition set to True")
+			}, timeout, interval).Should(Succeed())
 		})
 	})
 })
